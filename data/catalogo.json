@@ -1,0 +1,37 @@
+{
+  "_obs": "Catálogo Marca -> Modelos para os comboboxes. Editável: adicione/remova marcas e modelos à vontade. Usado como sugestão; ainda é possível digitar um valor novo.",
+  "marcas": {
+    "FIBERHOME": [
+      "GPON ONU AN5506",
+      "GPON ONU HG6143D",
+      "GPON ONU HG6143D3",
+      "GPON ONU HG6145D2"
+    ],
+    "HUAWEI": [
+      "AX2",
+      "AX2S"
+    ],
+    "MERCUSYS": [
+      "MR50G AC1900",
+      "MR60X AX1500 WI-FI 6 ROUTER",
+      "AC1200 AC12G 4 ANTENAS GIGABIT",
+      "MW301R 300MBPS",
+      "NW301 300MBPS"
+    ],
+    "TP-LINK": [
+      "ARCHER EC220-G5 AC1200 DUAL BAND GIGABIT",
+      "EC225-G5",
+      "TL-WR840N",
+      "TL-WR849N"
+    ],
+    "XIAOMI": [
+      "MI ROUTER 4A GIGABIT EDITION"
+    ],
+    "CIANET": [
+      "GPON ONU GB01 V2"
+    ],
+    "AIRGRID": [
+      "AIRGRID M5 27DBI"
+    ]
+  }
+}

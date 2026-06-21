@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Gerador de Documentos — Infobarra</title>
+  <link rel="manifest" href="manifest.json" />
+  <meta name="theme-color" content="#15397e" />
+  <link rel="apple-touch-icon" href="icons/icon-192.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!-- ===================== SIDEBAR ===================== -->
+  <aside class="sidebar">
+    <div class="brand">
+      <img class="brand-logo" src="assets/infobarra.png" alt="Infobarra" />
+      <span class="brand-sub">Gerador de Documentos</span>
+    </div>
+
+    <nav class="doc-switch" id="doc-switch">
+      <button class="doc-tab active" data-doc="comodato">
+        <span class="doc-tab-ico" aria-hidden="true">📄</span>
+        <span>Contrato de Comodato</span>
+      </button>
+      <button class="doc-tab" data-doc="recibo">
+        <span class="doc-tab-ico" aria-hidden="true">🧾</span>
+        <span>Recibo de Equipamento</span>
+      </button>
+      <button class="doc-tab" data-view="estoque">
+        <span class="doc-tab-ico" aria-hidden="true">📦</span>
+        <span>Estoque</span>
+      </button>
+      <button class="doc-tab" data-view="relatorios">
+        <span class="doc-tab-ico" aria-hidden="true">📊</span>
+        <span>Relatórios</span>
+      </button>
+    </nav>
+
+    <div id="op-status" class="op-status"></div>
+
+    <div class="side-section" id="clientes-section">
+      <div class="side-head">
+        <span id="list-count" class="pill">0</span>
+        <span>Clientes</span>
+        <button id="btn-new" class="btn-new" title="Novo cliente">+ Novo</button>
+      </div>
+      <div class="search-wrap">
+        <input id="search" type="text" placeholder="Buscar por nome, CPF/CNPJ ou contrato…" autocomplete="off" />
+      </div>
+      <div id="client-list" class="client-list"></div>
+    </div>
+
+    <div class="side-foot">
+      <button id="btn-export-base" class="btn-ghost" title="Exportar base de clientes (JSON)">⬇ Backup</button>
+      <button id="btn-import-base" class="btn-ghost" title="Restaurar base de clientes — aceita JSON ou Microsoft Access (.mdb)">⬆ Restaurar</button>
+      <input id="file-import" type="file" accept=".json,application/json,.mdb,application/msaccess,application/x-msaccess" hidden />
+    </div>
+  </aside>
+
+  <!-- ===================== MAIN ===================== -->
+  <main class="main">
+    <header class="topbar">
+      <div>
+        <h1 id="form-title">Contrato de Comodato</h1>
+        <p id="form-sub" class="muted">Selecione um cliente à esquerda ou clique em “+ Novo”.</p>
+      </div>
+    </header>
+
+    <section class="form-scroll">
+      <!-- Documento -->
+      <form id="doc-form" autocomplete="off"></form>
+
+      <!-- Estoque -->
+      <div id="estoque-view" hidden></div>
+
+      <!-- Relatórios (login por operador + termos assinados/operador) -->
+      <div id="relatorios-view" hidden></div>
+    </section>
+
+    <!-- Barra de ações (abaixo da data do documento) -->
+    <footer class="action-bar" id="action-bar">
+      <div class="ab-group">
+        <button id="btn-clear" class="btn btn-soft">Limpar</button>
+        <button id="btn-save" class="btn btn-soft">💾 Salvar cliente</button>
+      </div>
+      <div class="ab-group">
+        <button id="btn-print" class="btn btn-soft">🖨️ Imprimir</button>
+        <button id="btn-docx" class="btn btn-primary">⬇ Baixar DOCX</button>
+        <button id="btn-pdf" class="btn btn-accent">⬇ Baixar PDF</button>
+      </div>
+    </footer>
+  </main>
+
+  <!-- Overlay de login (portão do app) -->
+  <div id="login-overlay" class="login-overlay"></div>
+
+  <!-- Toast -->
+  <div id="toast" class="toast"></div>
+
+  <script src="vendor/jszip.min.js"></script>
+  <script src="config.local.js"></script>
+  <script src="app.js"></script>
+  <script>
+    if ('serviceWorker' in navigator && location.protocol.indexOf('http') === 0) {
+      window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));
+    }
+  </script>
+</body>
+</html>

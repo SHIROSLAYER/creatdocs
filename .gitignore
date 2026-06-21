@@ -1,0 +1,26 @@
+# ===== Dados sensíveis (PII) — NÃO versionar; vão para o Supabase =====
+data/clientes_comodato.json
+data/clientes_recibo.json
+data/store/
+data/assinados/
+
+# Config local com dados reais (testemunhas etc.) — fica só na máquina
+config.local.js
+
+# Ferramentas de dev / cirurgia de template — não precisam pra rodar o app
+_source/
+
+# Instruções internas do Claude Code (mantidas na máquina, fora do repo)
+CLAUDE.md
+.claude/
+
+# Temporários de build / preview
+.tmp_ctr/
+.tmp/
+
+# Sistema / editores
+*.tmp
+*.log
+Thumbs.db
+.DS_Store
+.vscode/
