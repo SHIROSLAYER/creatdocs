@@ -130,6 +130,8 @@ const state = {
   view: 'doc',         // 'doc' | 'estoque'
   lastDeductSig: '',   // evita baixa dupla de estoque (DOCX + PDF do mesmo doc)
   operador: null,      // operador logado { id, nome, role }
+  estoque: [],         // cache do estoque (memória); persiste local OU Supabase
+  catalogUser: {},     // catálogo aprendido (memória); persiste local OU Supabase
 };
 
 /* Normaliza marca para casar variações (TP-LINK / TP LINK / TPLINK) */
@@ -137,8 +139,32 @@ function normMarca(s){ return String(s||'').toUpperCase().replace(/[^A-Z0-9]/g,'
 
 /* Carrega o catálogo Marca->Modelos (data/catalogo.json) */
 const USER_CAT_KEY = 'infobarra_catalogo_user_v1';
-function loadUserCatalog(){ try { return JSON.parse(localStorage.getItem(USER_CAT_KEY) || '{}'); } catch(e){ return {}; } }
-function saveUserCatalog(o){ localStorage.setItem(USER_CAT_KEY, JSON.stringify(o)); }
+function loadUserCatalogLocal(){ try { return JSON.parse(localStorage.getItem(USER_CAT_KEY) || '{}'); } catch(e){ return {}; } }
+function loadUserCatalog(){ return state.catalogUser || {}; }   // cache em memória (base p/ rebuild)
+function saveUserCatalog(o){
+  state.catalogUser = o || {};
+  if (_supa()) syncCatalogRemote(state.catalogUser);
+  else localStorage.setItem(USER_CAT_KEY, JSON.stringify(state.catalogUser));
+}
+
+/* Catálogo aprendido na nuvem (tabela catalogo, PK = marca) */
+async function loadUserCatalogRemote(){
+  try {
+    const { data, error } = await sb.from('catalogo').select('marca,modelos');
+    if (error) throw error;
+    const o = {};
+    for (const r of (data || [])){ o[normMarca(r.marca)] = { display: r.marca, modelos: r.modelos || [] }; }
+    return o;
+  } catch(e){ console.warn('loadUserCatalogRemote:', e.message); return {}; }
+}
+async function syncCatalogRemote(o){
+  try {
+    const rows = Object.values(o || {})
+      .map(u => ({ marca: (u.display || '').trim(), modelos: u.modelos || [] }))
+      .filter(r => r.marca);
+    if (rows.length){ const { error } = await sb.from('catalogo').upsert(rows, { onConflict: 'marca' }); if (error) throw error; }
+  } catch(e){ console.warn('syncCatalogRemote:', e.message); }
+}
 
 async function loadCatalog(){
   try {
@@ -149,6 +175,7 @@ async function loadCatalog(){
     console.warn('Catálogo base não carregado:', e);
     state.baseMarcas = {};
   }
+  state.catalogUser = _supa() ? await loadUserCatalogRemote() : loadUserCatalogLocal();
   rebuildCatalog();
 }
 
@@ -824,10 +851,54 @@ function setView(v){
   }
 }
 
-/* --------------------------- Estoque (localStorage) --------------------------- */
+/* --------------------------- Estoque (local OU Supabase) --------------------------- */
 const ESTOQUE_KEY = 'infobarra_estoque_v1';
-function loadEstoque(){ try { return JSON.parse(localStorage.getItem(ESTOQUE_KEY) || '[]'); } catch(e){ return []; } }
-function saveEstoque(arr){ localStorage.setItem(ESTOQUE_KEY, JSON.stringify(arr)); }
+function loadEstoque(){ return state.estoque || []; }   // cache em memória
+function loadEstoqueLocal(){ try { return JSON.parse(localStorage.getItem(ESTOQUE_KEY) || '[]'); } catch(e){ return []; } }
+let _estoqueSyncChain = Promise.resolve();
+function saveEstoque(arr){
+  state.estoque = arr || [];
+  if (_supa()){
+    const snap = state.estoque.slice();
+    _estoqueSyncChain = _estoqueSyncChain.then(() => syncEstoqueRemote(snap)).catch(() => {});
+  } else {
+    localStorage.setItem(ESTOQUE_KEY, JSON.stringify(state.estoque));
+  }
+}
+
+/* Lê o estoque da nuvem (tabela estoque) */
+async function loadEstoqueRemote(){
+  try {
+    const { data, error } = await sb.from('estoque').select('marca,modelo,qtd').order('marca');
+    if (error) throw error;
+    return (data || []).map(r => ({ marca: r.marca, modelo: r.modelo, qtd: parseInt(r.qtd,10) || 0 }));
+  } catch(e){ console.warn('loadEstoqueRemote:', e.message); return []; }
+}
+/* Sincroniza o array do estoque com a tabela (update por id, insere novos, apaga removidos) */
+async function syncEstoqueRemote(arr){
+  try {
+    const { data: rows, error } = await sb.from('estoque').select('id,marca,modelo');
+    if (error) throw error;
+    const keyOf = (m, mo) => normMarca(m) + '|' + String(mo).toUpperCase().trim();
+    const dbByKey = new Map((rows || []).map(r => [keyOf(r.marca, r.modelo), r.id]));
+    const seen = new Set();
+    for (const it of arr){
+      const k = keyOf(it.marca, it.modelo);
+      const qtd = parseInt(it.qtd, 10) || 0;
+      if (dbByKey.has(k)){
+        const id = dbByKey.get(k); seen.add(id);
+        const { error: e2 } = await sb.from('estoque').update({ qtd, updated_at: new Date().toISOString() }).eq('id', id);
+        if (e2) throw e2;
+      } else {
+        const { data: ins, error: e3 } = await sb.from('estoque').insert({ marca: it.marca, modelo: it.modelo, qtd }).select('id').maybeSingle();
+        if (e3) throw e3;
+        if (ins) seen.add(ins.id);
+      }
+    }
+    const toDel = (rows || []).filter(r => !seen.has(r.id)).map(r => r.id);
+    if (toDel.length){ const { error: e4 } = await sb.from('estoque').delete().in('id', toDel); if (e4) throw e4; }
+  } catch(e){ console.warn('syncEstoqueRemote:', e.message); toast('Falha ao salvar estoque na nuvem.', true); }
+}
 
 function renderEstoque(){
   const items = loadEstoque();
@@ -983,18 +1054,48 @@ function fmtData(iso){
 
 /* Registra/atualiza o termo gerado (1 linha por tipo+contrato) */
 async function logOperacao(vals, def){
+  const tipo = state.doc;
+  const contrato = (vals.CONTRATO || '').trim();
+  const cliente = (vals.CLIENTE_ || vals['RAZÃO_SOCIAL'] || '').trim();
+  const operador = state.operador ? state.operador.nome : '—';
+
+  if (_supa()){
+    try {
+      const now = new Date().toISOString();
+      const operador_id = state.operador ? state.operador.id : null;
+      if (contrato){
+        const { data: ex } = await sb.from('operacoes').select('id').eq('tipo', tipo).eq('contrato', contrato).limit(1).maybeSingle();
+        if (ex){ await sb.from('operacoes').update({ cliente, operador, operador_id, data: now }).eq('id', ex.id); return; }
+      }
+      await sb.from('operacoes').insert({ tipo, contrato: contrato || null, cliente, operador, operador_id, data: now });
+    } catch(e){ console.warn('logOperacao (supabase):', e.message); }
+    return;
+  }
+
   try {
     const ops = (await storeGet('operacoes')) || [];
-    const tipo = state.doc;
-    const contrato = (vals.CONTRATO || '').trim();
-    const cliente = (vals.CLIENTE_ || vals['RAZÃO_SOCIAL'] || '').trim();
-    const operador = state.operador ? state.operador.nome : '—';
     const k = tipo + '|' + contrato.toUpperCase();
     const op = contrato ? ops.find(o => (o.tipo + '|' + String(o.contrato||'').toUpperCase()) === k) : null;
     if (op){ op.cliente = cliente || op.cliente; op.operador = operador; op.data = new Date().toISOString(); }
     else ops.push({ id: uid(), tipo, contrato, cliente, operador, data: new Date().toISOString(), assinado:false, assinadoEm:null, anexo:null });
     await storeSet('operacoes', ops);
   } catch(e){ console.warn('logOperacao falhou:', e); }
+}
+
+/* Lê as operações (relatórios) da nuvem ou do store local */
+async function loadOperacoes(){
+  if (_supa()){
+    try {
+      const { data, error } = await sb.from('operacoes').select('*').order('data', { ascending: false });
+      if (error) throw error;
+      return (data || []).map(o => ({
+        id: o.id, tipo: o.tipo, contrato: o.contrato, cliente: o.cliente,
+        operador: o.operador, data: o.data, assinado: !!o.assinado,
+        assinadoEm: o.assinado_em, anexo: o.anexo_url,
+      }));
+    } catch(e){ console.warn('loadOperacoes (supabase):', e.message); return []; }
+  }
+  return (await storeGet('operacoes')) || [];
 }
 function uid(){ return (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(16).slice(2)); }
 
@@ -1088,7 +1189,11 @@ async function onLoggedIn(){
   $('#login-overlay').classList.remove('show');
   updateOpStatus();
   if (_supa()){
-    await loadData('comodato'); await loadData('recibo'); renderList();
+    await loadData('comodato'); await loadData('recibo');
+    state.estoque = await loadEstoqueRemote();
+    state.catalogUser = await loadUserCatalogRemote(); rebuildCatalog();
+    renderList();
+    if (state.view === 'estoque') renderEstoque();
   }
   if (state.view === 'relatorios') renderRelatorios();
 }
@@ -1219,7 +1324,7 @@ async function renderRelatorios(){
     wireLogin(first);
     return;
   }
-  _rel.ops = (await storeGet('operacoes')) || [];
+  _rel.ops = await loadOperacoes();
   box.innerHTML = relReportHtml();
   wireReport();
 }
@@ -1289,7 +1394,7 @@ function fillRelTable(){
   if (f.q){ const q = f.q.toLowerCase(); rows = rows.filter(o => (String(o.contrato||'') + ' ' + String(o.cliente||'')).toLowerCase().includes(q)); }
   $('#rel-tbody').innerHTML = rows.length ? rows.map(o => {
     const st = o.assinado ? `<span class="rel-st on">✔ Assinado</span>` : `<span class="rel-st off">○ Não assinado</span>`;
-    const link = o.anexo ? ` <a class="rel-anexo" href="${escHtml(o.anexo)}" target="_blank" title="Ver PDF assinado">📎</a>` : '';
+    const link = o.anexo ? ` <button class="rel-anexo" data-act="ver-anexo" data-id="${o.id}" title="Ver PDF assinado">📎</button>` : '';
     return `<tr>
       <td>${fmtData(o.data)}</td>
       <td>${escHtml(o.operador||'—')}</td>
@@ -1323,13 +1428,31 @@ function wireReport(){
     else if (act === 'addop') addOperadorFromForm();
     else if (act === 'delop') removerOperador(id);
     else if (act === 'import-clients') importLocalClientsToCloud();
+    else if (act === 'ver-anexo') openAnexo(id);
   };
 }
 async function toggleAssinado(id){
   const o = _rel.ops.find(x => x.id === id); if (!o) return;
   o.assinado = !o.assinado; o.assinadoEm = o.assinado ? new Date().toISOString() : null;
-  await storeSet('operacoes', _rel.ops);
+  if (_supa()){
+    try { await sb.from('operacoes').update({ assinado: o.assinado, assinado_em: o.assinadoEm }).eq('id', id); }
+    catch(e){ toast('Falha ao atualizar na nuvem: ' + e.message, true); }
+  } else {
+    await storeSet('operacoes', _rel.ops);
+  }
   fillRelTable();
+}
+async function openAnexo(id){
+  const o = _rel.ops.find(x => x.id === id); if (!o || !o.anexo) return;
+  if (_supa()){
+    try {
+      const { data, error } = await sb.storage.from('assinados').createSignedUrl(o.anexo, 60 * 60);
+      if (error) throw error;
+      window.open(data.signedUrl, '_blank');
+    } catch(e){ toast('Erro ao abrir anexo: ' + e.message, true); }
+  } else {
+    window.open(o.anexo, '_blank');
+  }
 }
 function anexarPdf(id){
   const inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'application/pdf,.pdf';
@@ -1338,6 +1461,18 @@ function anexarPdf(id){
     const o = _rel.ops.find(x => x.id === id); if (!o) return;
     const name = (o.tipo + '_' + (o.contrato || o.id) + '_assinado.pdf').replace(/[^A-Za-z0-9._-]/g, '_');
     toast('Enviando PDF assinado…');
+    if (_supa()){
+      try {
+        const path = o.tipo + '/' + name;
+        const { error: upErr } = await sb.storage.from('assinados').upload(path, file, { upsert: true, contentType: 'application/pdf' });
+        if (upErr) throw upErr;
+        o.anexo = path; o.assinado = true; o.assinadoEm = new Date().toISOString();
+        const { error } = await sb.from('operacoes').update({ assinado: true, assinado_em: o.assinadoEm, anexo_url: path }).eq('id', id);
+        if (error) throw error;
+        fillRelTable(); toast('PDF assinado anexado. ✓');
+      } catch(e){ toast('Erro ao anexar: ' + e.message, true); }
+      return;
+    }
     try {
       const r = await fetch('/__upload?name=' + encodeURIComponent(name), { method:'POST', headers:{ 'Content-Type':'application/pdf' }, body: file });
       if (!r.ok) throw new Error((await r.text()).slice(0,120));
@@ -1412,6 +1547,7 @@ async function init(){
   await loadData('comodato');
   await loadData('recibo');
   await loadCatalog();
+  state.estoque = _supa() ? await loadEstoqueRemote() : loadEstoqueLocal();
   renderForm();
   fillForm(null);
   renderList();
