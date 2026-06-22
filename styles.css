@@ -286,6 +286,10 @@ table.rel-table .mono{font-family:var(--mono);font-weight:600;color:var(--navy)}
 .lo-card input{padding:12px 13px;border-radius:10px;border:1px solid var(--line);background:#f8fafd;font-size:14px;outline:none}
 .lo-card input:focus{border-color:var(--blue);background:#fff;box-shadow:0 0 0 3px rgba(47,111,237,.15)}
 .lo-card .btn{margin-top:4px}
+.lo-remember{display:flex;align-items:center;gap:8px;font-size:13px;color:#475569;text-align:left;cursor:pointer;user-select:none}
+.lo-remember input{width:16px;height:16px;padding:0;margin:0;flex:0 0 auto;background:#fff;box-shadow:none;accent-color:var(--blue)}
+.lo-remember input:focus{box-shadow:none}
+.lo-captcha{display:flex;justify-content:center;min-height:78px}
 
 /* ===================== TOAST ===================== */
 .toast{

@@ -13,6 +13,7 @@ _source/
 # Instruções internas do Claude Code (mantidas na máquina, fora do repo)
 CLAUDE.md
 .claude/
+.mcp.json
 
 # Temporários de build / preview
 .tmp_ctr/

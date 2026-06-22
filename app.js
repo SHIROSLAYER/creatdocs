@@ -206,38 +206,54 @@ function displayName(rec){
   return (recVal(rec,'CLIENTE ') || recVal(rec,'RAZÃO SOCIAL') || '(sem nome)').trim();
 }
 
+/* Registro tem conteúdo real? (descarta linhas em branco vindas do Access) */
+function clientHasContent(r){
+  const nome = (recVal(r,'CLIENTE ') || recVal(r,'RAZÃO SOCIAL')).trim();
+  return !!(nome || recVal(r,'CONTRATO').trim() || recVal(r,'CPF/CNPJ').trim() || recVal(r,'CPF').trim());
+}
+
 /* --------------------------- Carga de dados --------------------------- */
 async function loadData(docKey){
   const def = DOCS[docKey];
+
+  // Modo nuvem: lê os clientes da tabela `clientes` (RLS exige login → [] sem sessão)
+  if (_supa()){
+    try {
+      const { data, error } = await sb.from('clientes').select('dados').eq('tipo', docKey);
+      if (error) throw error;
+      state.clients[docKey] = (data || [])
+        .map(row => row.dados || {})
+        .filter(clientHasContent)
+        .sort((a,b) => displayName(a).localeCompare(displayName(b),'pt-BR'));
+    } catch(e){
+      console.warn('loadData (supabase):', e.message);
+      state.clients[docKey] = state.clients[docKey] || [];
+    }
+    return;
+  }
+
+  // Modo local: seed (JSON) + edições do localStorage, dedup por CONTRATO
   let seed = [];
   try {
     const r = await fetch(def.dataUrl, { cache:'no-store' });
     if (r.ok) seed = await r.json();
   } catch(e){ console.warn('Falha ao carregar seed', def.dataUrl, e); }
 
-  // Registros locais (adicionados/editados) sobrescrevem por CONTRATO
   let local = [];
   try { local = JSON.parse(localStorage.getItem(def.storeKey) || '[]'); } catch(e){}
 
-  // Mescla: seed + locais, dedup por CONTRATO (local vence)
   const byContrato = new Map();
   for (const r of seed)  byContrato.set(normKey(recVal(r,'CONTRATO')) || Symbol(), r);
   for (const r of local) byContrato.set(normKey(recVal(r,'CONTRATO')) || Symbol(), r);
 
-  // Remove registros totalmente vazios (linhas em branco vindas do Access)
-  const hasContent = r => {
-    const nome = (recVal(r,'CLIENTE ') || recVal(r,'RAZÃO SOCIAL')).trim();
-    return nome || recVal(r,'CONTRATO').trim() ||
-           recVal(r,'CPF/CNPJ').trim() || recVal(r,'CPF').trim();
-  };
-
   state.clients[docKey] = Array.from(byContrato.values())
-    .filter(hasContent)
+    .filter(clientHasContent)
     .sort((a,b) => displayName(a).localeCompare(displayName(b),'pt-BR'));
 }
 
-/* Persiste apenas registros locais (com flag _local) */
+/* Persiste registros locais (modo local). Na nuvem, persistência é no Supabase. */
 function saveLocal(docKey){
+  if (_supa()) return;
   const def = DOCS[docKey];
   const local = state.clients[docKey].filter(r => r._local);
   localStorage.setItem(def.storeKey, JSON.stringify(local));
@@ -443,7 +459,7 @@ function newClient(){
   toast('Novo cliente — preencha e clique em Salvar ou gere o documento.');
 }
 
-function saveClient(){
+async function saveClient(){
   const def = DOCS[state.doc];
   const rec = collectRecord();
   const contrato = normKey(recVal(rec,'CONTRATO'));
@@ -460,9 +476,75 @@ function saveClient(){
 
   arr.sort((a,b) => displayName(a).localeCompare(displayName(b),'pt-BR'));
   saveLocal(state.doc);
+  if (_supa()) await upsertClienteRemote(state.doc, rec);
   learnFromValues(collectValues(), def);   // aprende marcas/modelos digitados
   renderList();
-  toast('Cliente salvo na base local. ✓');
+  toast(_supa() ? 'Cliente salvo na nuvem. ✓' : 'Cliente salvo na base local. ✓');
+}
+
+/* Upsert de 1 cliente na nuvem (casa por tipo+contrato; senão insere) */
+async function upsertClienteRemote(docKey, rec){
+  try {
+    const contrato = (recVal(rec,'CONTRATO') || '').trim();
+    const dados = Object.assign({}, rec); delete dados._local;
+    const row = {
+      tipo: docKey,
+      contrato: contrato || null,
+      nome: displayName(rec),
+      cpf: (recVal(rec,'CPF/CNPJ') || recVal(rec,'CPF') || '').trim(),
+      dados,
+      updated_at: new Date().toISOString(),
+    };
+    if (contrato){
+      const { data: ex } = await sb.from('clientes').select('id').eq('tipo', docKey).eq('contrato', contrato).limit(1).maybeSingle();
+      if (ex){ const { error } = await sb.from('clientes').update(row).eq('id', ex.id); if (error) throw error; return; }
+    }
+    const { error } = await sb.from('clientes').insert(row);
+    if (error) throw error;
+  } catch(e){ toast('Falha ao salvar na nuvem: ' + e.message, true); }
+}
+
+/* Importa a base local (JSON + edições) para a nuvem — admin, roda 1 vez */
+async function importLocalClientsToCloud(){
+  if (!_supa()){ toast('Importação só no modo nuvem.', true); return; }
+  if (!confirm('Importar a base local (comodato + recibo) para a nuvem?\nPode rodar 1 vez; contratos já existentes são atualizados.')) return;
+  toast('Importando base local para a nuvem…');
+  let total = 0;
+  try {
+    for (const docKey of ['comodato','recibo']){
+      const def = DOCS[docKey];
+      let seed = [];
+      try { const r = await fetch(def.dataUrl, { cache:'no-store' }); if (r.ok) seed = await r.json(); } catch(_){}
+      let local = []; try { local = JSON.parse(localStorage.getItem(def.storeKey) || '[]'); } catch(_){}
+      const byC = new Map();
+      for (const rec of [...seed, ...local]){ if (clientHasContent(rec)) byC.set(normKey(recVal(rec,'CONTRATO')) || Symbol(), rec); }
+      const recs = Array.from(byC.values());
+
+      const { data: existing } = await sb.from('clientes').select('id,contrato').eq('tipo', docKey);
+      const exMap = new Map((existing || []).map(e => [normKey(e.contrato || ''), e.id]));
+
+      const ins = [], upd = [];
+      for (const rec of recs){
+        const c = normKey(recVal(rec,'CONTRATO'));
+        const dados = Object.assign({}, rec); delete dados._local;
+        const row = { tipo: docKey, contrato: (recVal(rec,'CONTRATO') || '').trim() || null, nome: displayName(rec), cpf: (recVal(rec,'CPF/CNPJ') || recVal(rec,'CPF') || '').trim(), dados };
+        if (c && exMap.has(c)) upd.push({ id: exMap.get(c), row }); else ins.push(row);
+      }
+      for (let i = 0; i < ins.length; i += 200){
+        const slice = ins.slice(i, i + 200);
+        const { error } = await sb.from('clientes').insert(slice);
+        if (error) throw new Error(docKey + ': ' + error.message);
+        total += slice.length;
+      }
+      for (const u of upd){
+        const { error } = await sb.from('clientes').update(u.row).eq('id', u.id);
+        if (error) throw new Error(docKey + ': ' + error.message);
+        total++;
+      }
+    }
+    toast('Importados/atualizados ' + total + ' clientes na nuvem. ✓');
+    await loadData('comodato'); await loadData('recibo'); renderList();
+  } catch(e){ toast('Erro na importação: ' + e.message, true); }
 }
 
 /* --------------------------- Geração DOCX --------------------------- */
@@ -916,9 +998,51 @@ async function logOperacao(vals, def){
 }
 function uid(){ return (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(16).slice(2)); }
 
-/* --- Operadores / auth (gate local, senha em hash SHA-256) --- */
-async function getOperadores(){ return (await storeGet('operadores')) || []; }
-async function criarOperador(nome, senha, role){
+/* --- Operadores / auth ---
+   Com Supabase configurado: login = Supabase Auth (e-mail + senha); perfis na
+   tabela `perfis`. Sem Supabase: gate local (hash SHA-256 no /__store). */
+function _supa(){ return !!(window.hasSupabase && window.hasSupabase()); }
+
+async function getOperadores(){
+  if (_supa()){
+    try {
+      const { data, error } = await sb.from('perfis').select('id,nome,role').order('nome');
+      if (error) throw error;
+      return (data || []).map(p => ({ id:p.id, nome:p.nome, role:p.role }));
+    } catch(e){ console.warn('getOperadores (supabase):', e.message); return []; }
+  }
+  return (await storeGet('operadores')) || [];
+}
+
+/* Carrega nome/role do usuário logado (tabela perfis; fallback p/ metadata/e-mail) */
+async function loadPerfilFromSupabase(user){
+  let nome = (user.user_metadata && user.user_metadata.nome) || (user.email || '').split('@')[0];
+  let role = 'operador';
+  try {
+    const { data } = await sb.from('perfis').select('nome,role').eq('id', user.id).maybeSingle();
+    if (data){ nome = data.nome || nome; role = data.role || role; }
+  } catch(e){ /* perfil pode não existir ainda */ }
+  return { id:user.id, nome, role, email:user.email };
+}
+
+async function criarOperador(nome, senha, role, email){
+  if (_supa()){
+    email = (email||'').trim();
+    nome  = (nome||'').trim();
+    if (!email || !senha){ toast('Informe e-mail e senha.', true); return false; }
+    try {
+      const { data, error } = await sb.functions.invoke('admin-create-user', {
+        body: { email, password: senha, nome, role: role || 'operador' },
+      });
+      let errMsg = null;
+      if (error){
+        errMsg = error.message;
+        try { const j = await error.context.json(); if (j && j.error) errMsg = j.error; } catch(_){}
+      } else if (data && data.error){ errMsg = data.error; }
+      if (errMsg){ toast('Não criou: ' + errMsg, true); return false; }
+      return true;
+    } catch(e){ toast('Falha ao criar usuário: ' + e.message, true); return false; }
+  }
   nome = (nome||'').trim();
   if (!nome || !senha){ toast('Informe nome e senha.', true); return false; }
   const ops = await getOperadores();
@@ -927,9 +1051,25 @@ async function criarOperador(nome, senha, role){
   if (!(await storeSet('operadores', ops))){ toast('Falha ao salvar (rode pelo INICIAR.bat).', true); return false; }
   return true;
 }
-async function loginOperador(nome, senha){
+
+/* Login. No Supabase: id = e-mail; valida o reCAPTCHA (se configurado) antes de entrar. */
+async function loginOperador(id, senha, captchaToken){
+  if (_supa()){
+    const email = (id||'').trim();
+    if (!email || !senha){ toast('Informe e-mail e senha.', true); return false; }
+    if (recaptchaEnabled()){
+      if (!captchaToken){ toast('Confirme o “Não sou robô”.', true); return false; }
+      if (!(await verifyCaptcha(captchaToken))){ toast('Falha no reCAPTCHA — tente de novo.', true); resetCaptcha(); return false; }
+    }
+    const { data, error } = await sb.auth.signInWithPassword({ email, password: senha });
+    if (error){ toast('Login falhou: ' + (error.message || 'verifique e-mail/senha'), true); resetCaptcha(); return false; }
+    state.operador = await loadPerfilFromSupabase(data.user);
+    toast('Bem-vindo, ' + state.operador.nome + '.');
+    onLoggedIn();
+    return true;
+  }
   const ops = await getOperadores();
-  const o = ops.find(x => x.nome.toLowerCase() === (nome||'').trim().toLowerCase());
+  const o = ops.find(x => x.nome.toLowerCase() === (id||'').trim().toLowerCase());
   if (!o){ toast('Operador não encontrado.', true); return false; }
   if (await sha256(senha) !== o.hash){ toast('Senha incorreta.', true); return false; }
   state.operador = { id:o.id, nome:o.nome, role:o.role };
@@ -938,17 +1078,77 @@ async function loginOperador(nome, senha){
   onLoggedIn();
   return true;
 }
-function logoutOperador(){ state.operador = null; saveSessao(null); toast('Sessão encerrada.'); updateOpStatus(); gateLogin(); }
 
-/* Portão de login: mostra overlay até o operador entrar (necessário para criar/editar) */
-function onLoggedIn(){
+async function logoutOperador(){
+  if (_supa()){ try { await sb.auth.signOut(); } catch(e){} }
+  state.operador = null; saveSessao(null); toast('Sessão encerrada.'); updateOpStatus(); gateLogin();
+}
+
+async function onLoggedIn(){
   $('#login-overlay').classList.remove('show');
   updateOpStatus();
+  if (_supa()){
+    await loadData('comodato'); await loadData('recibo'); renderList();
+  }
   if (state.view === 'relatorios') renderRelatorios();
 }
+
+/* --- reCAPTCHA v2 (opcional; só ativa se config.js tiver a site key) --- */
+function recaptchaEnabled(){ return !!(window.RECAPTCHA && window.RECAPTCHA.siteKey); }
+let _captchaWidgetId = null;
+function renderCaptchaInto(elId){
+  if (!recaptchaEnabled()) return;
+  const tryRender = () => {
+    if (!(window.grecaptcha && grecaptcha.render)) return setTimeout(tryRender, 200);
+    const el = document.getElementById(elId);
+    if (!el || el.dataset.rendered) return;
+    el.dataset.rendered = '1';
+    _captchaWidgetId = grecaptcha.render(el, { sitekey: window.RECAPTCHA.siteKey });
+  };
+  tryRender();
+}
+function getCaptchaToken(){
+  try { return (window.grecaptcha && _captchaWidgetId !== null) ? grecaptcha.getResponse(_captchaWidgetId) : ''; }
+  catch(e){ return ''; }
+}
+function resetCaptcha(){ try { if (window.grecaptcha && _captchaWidgetId !== null) grecaptcha.reset(_captchaWidgetId); } catch(e){} }
+async function verifyCaptcha(token){
+  try {
+    const { data, error } = await sb.functions.invoke('verify-recaptcha', { body:{ token } });
+    // function indisponível (ainda não deployada / fora do ar) → não tranca o login
+    if (error){ console.warn('verify-recaptcha indisponível, liberando login:', error.message); return true; }
+    return !!(data && data.success);   // deployada: vale o que o Google disser
+  } catch(e){ console.warn('verifyCaptcha exceção, liberando login:', e.message); return true; }
+}
+
+/* Portão de login: mostra overlay até o operador entrar (necessário para criar/editar) */
 async function gateLogin(){
   const ov = $('#login-overlay');
   if (state.operador){ ov.classList.remove('show'); updateOpStatus(); return; }
+
+  if (_supa()){
+    ov.innerHTML = `<div class="lo-card">
+      <img src="assets/infobarra.png" class="lo-logo" alt="Infobarra">
+      <h2>Entrar</h2>
+      <p class="muted">Acesse com seu e-mail e senha para criar e editar documentos.</p>
+      <input id="lg-email" type="email" placeholder="E-mail" autocomplete="username">
+      <input id="lg-senha" type="password" placeholder="Senha" autocomplete="current-password">
+      <label class="lo-remember"><input type="checkbox" id="lg-remember" ${window.sbRemember() ? 'checked' : ''}> Lembrar login neste dispositivo</label>
+      ${recaptchaEnabled() ? '<div id="lg-captcha" class="lo-captcha"></div>' : ''}
+      <button class="btn btn-primary" id="lg-go">Entrar</button></div>`;
+    ov.classList.add('show');
+    const submit = async () => {
+      window.sbRemember($('#lg-remember').checked);
+      await loginOperador($('#lg-email').value, $('#lg-senha').value, getCaptchaToken());
+    };
+    $('#lg-go').onclick = submit;
+    ['lg-email','lg-senha'].forEach(id => $('#'+id).addEventListener('keydown', e => { if (e.key === 'Enter') submit(); }));
+    renderCaptchaInto('lg-captcha');
+    setTimeout(() => { const n = $('#lg-email'); if (n) n.focus(); }, 60);
+    return;
+  }
+
+  // ---- modo local (sem Supabase) ----
   ov.innerHTML = `<div class="lo-card"><p class="muted">Carregando…</p></div>`;
   ov.classList.add('show');
   let ops = null, ok = true;
@@ -992,6 +1192,10 @@ function updateOpStatus(){
   }
 }
 async function removerOperador(id){
+  if (_supa()){
+    toast('No modo nuvem, remova operadores em Authentication → Users no painel do Supabase.', true);
+    return;
+  }
   if (!confirm('Remover este operador?')) return;
   let ops = await getOperadores();
   ops = ops.filter(o => o.id !== id);
@@ -1118,6 +1322,7 @@ function wireReport(){
     else if (act === 'anexar') anexarPdf(id);
     else if (act === 'addop') addOperadorFromForm();
     else if (act === 'delop') removerOperador(id);
+    else if (act === 'import-clients') importLocalClientsToCloud();
   };
 }
 async function toggleAssinado(id){
@@ -1151,24 +1356,42 @@ function toggleAdminPanel(){
       <td>${escHtml(o.nome)}</td><td>${o.role === 'admin' ? 'Administrador' : 'Operador'}</td>
       <td class="rel-acts">${o.id !== state.operador.id ? `<button class="stock-mini del" data-act="delop" data-id="${o.id}" title="Remover">🗑</button>` : '<span class="muted">você</span>'}</td>
     </tr>`).join('');
+  const cloud = _supa();
   el.innerHTML = `<div class="card">
     <div class="card-head"><span class="dot"></span><h2>Operadores</h2></div>
     <table class="rel-table"><thead><tr><th>Nome</th><th>Perfil</th><th></th></tr></thead><tbody>${list}</tbody></table>
+    <p class="muted" style="margin:4px 0 0">Só administradores criam usuários. Marque <b>Administrador</b> para dar acesso total.</p>
     <div class="rel-addop">
-      <input id="op-nome" placeholder="Nome do operador" autocomplete="off">
+      <input id="op-nome" placeholder="Nome" autocomplete="off">
+      ${cloud ? '<input id="op-email" type="email" placeholder="E-mail" autocomplete="off">' : ''}
       <input id="op-senha" type="password" placeholder="Senha" autocomplete="new-password">
       <select id="op-role"><option value="operador">Operador</option><option value="admin">Administrador</option></select>
       <button class="btn-add" data-act="addop">+ Adicionar</button>
-    </div></div>`;
+    </div>
+    ${cloud ? '<div style="margin-top:12px;border-top:1px solid var(--line);padding-top:10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap"><button class="btn btn-soft" data-act="import-clients">⬆ Importar clientes locais → nuvem</button><span class="muted" style="font-size:12px">Migração: rode 1 vez.</span></div>' : ''}
+  </div>`;
 }
 async function addOperadorFromForm(){
-  const nome = $('#op-nome').value, senha = $('#op-senha').value, role = $('#op-role').value;
-  if (await criarOperador(nome, senha, role)){ _rel.operadores = await getOperadores(); toast('Operador criado. ✓'); renderRelatorios(); }
+  const nome = $('#op-nome').value;
+  const email = $('#op-email') ? $('#op-email').value : '';
+  const senha = $('#op-senha').value, role = $('#op-role').value;
+  if (await criarOperador(nome, senha, role, email)){ _rel.operadores = await getOperadores(); toast('Usuário criado. ✓'); renderRelatorios(); }
 }
 
 /* --------------------------- Inicialização --------------------------- */
+async function restoreSession(){
+  if (_supa()){
+    try {
+      const { data } = await sb.auth.getSession();
+      const user = data && data.session && data.session.user;
+      state.operador = user ? await loadPerfilFromSupabase(user) : null;
+    } catch(e){ state.operador = null; }
+  } else {
+    state.operador = loadSessao();
+  }
+}
 async function init(){
-  state.operador = loadSessao();
+  await restoreSession();
   // Eventos UI
   $('#doc-switch').addEventListener('click', e => {
     const b = e.target.closest('.doc-tab'); if (!b) return;
