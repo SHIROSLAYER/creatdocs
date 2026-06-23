@@ -1199,7 +1199,13 @@ async function onLoggedIn(){
 }
 
 /* --- reCAPTCHA v2 (opcional; só ativa se config.js tiver a site key) --- */
-function recaptchaEnabled(){ return !!(window.RECAPTCHA && window.RECAPTCHA.siteKey); }
+function recaptchaEnabled(){
+  // Em localhost (testes/dev) o reCAPTCHA fica OFF — evita o erro "domínio inválido"
+  // e não trava o login. No domínio real (GitHub Pages) ele liga normalmente.
+  const h = location.hostname;
+  if (h === 'localhost' || h === '127.0.0.1' || h === '') return false;
+  return !!(window.RECAPTCHA && window.RECAPTCHA.siteKey);
+}
 let _captchaWidgetId = null;
 function renderCaptchaInto(elId){
   if (!recaptchaEnabled()) return;
