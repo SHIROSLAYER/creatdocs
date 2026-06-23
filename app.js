@@ -1200,11 +1200,12 @@ async function onLoggedIn(){
 
 /* --- reCAPTCHA v2 (opcional; só ativa se config.js tiver a site key) --- */
 function recaptchaEnabled(){
-  // Em localhost (testes/dev) o reCAPTCHA fica OFF — evita o erro "domínio inválido"
-  // e não trava o login. No domínio real (GitHub Pages) ele liga normalmente.
+  // desligado por config (enabled:false) OU sem site key → sem captcha
+  if (!(window.RECAPTCHA && window.RECAPTCHA.enabled && window.RECAPTCHA.siteKey)) return false;
+  // em localhost (dev) também fica OFF — evita erro de "domínio inválido"
   const h = location.hostname;
   if (h === 'localhost' || h === '127.0.0.1' || h === '') return false;
-  return !!(window.RECAPTCHA && window.RECAPTCHA.siteKey);
+  return true;
 }
 let _captchaWidgetId = null;
 function renderCaptchaInto(elId){

@@ -14,5 +14,6 @@ window.SUPABASE_CONFIG = {
    o captcha. Site key é pública (pode ir no repo); a SECRET fica só na edge
    function (segredo RECAPTCHA_SECRET), nunca aqui. */
 window.RECAPTCHA = {
+  enabled: false,   // ← false = sem "Não sou robô" no login. Põe true p/ religar.
   siteKey: '6LerRS4tAAAAAMuPsIg1nLMVKdoAXgYWRptNdKY_',
 };
